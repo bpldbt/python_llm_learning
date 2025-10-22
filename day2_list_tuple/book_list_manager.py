@@ -1,3 +1,5 @@
+import json
+
 empty_list = []
 fruits = ["apple", "banana", "cherry"]
 mixed_list = ["hello", 123, True]
@@ -38,3 +40,14 @@ my_book_list.append("The Pragmatic Programmer")
 print("我的图书馆(初始):", my_book_list)
 print("第一本书是:", my_book_list[0])
 print("最后一本书是：", my_book_list[-1])
+
+def load_book_from_json(filename):
+    try:
+        with open(filename, 'r', encoding='utf-8') as file:
+            return json.load(file)
+    except FileNotFoundError:
+        print("文件未找到:", filename)
+        return []
+    except json.JSONDecodeError:
+        print("JSON解码错误")
+        return []
