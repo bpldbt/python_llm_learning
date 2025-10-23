@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI
 from library import Library
 from book import BookCreateModel
@@ -10,6 +11,9 @@ from pydantic import BaseModel
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader
+from langchain_ollama import OllamaEmbeddings
+from langchain_community.vectorstores import Chroma
+
 
 from api_mode import ResponseModel
 
@@ -18,6 +22,14 @@ app = FastAPI(title="个人藏书管理 API", description="一个用于管理个
 
 # 1. 初始化 Ollama LLM 客户端，指向本地运行的 Llama3 模型
 llm = OllamaLLM(model = "llama3:8b")
+
+# --- 新增：初始化嵌入模型 ---
+# 这个模型专门用来将文本转换为向量
+embeddings = OllamaEmbeddings(model="nomic-embed-text")
+# --- 新增：定义向量数据库的持久化路径 ---
+# 我们将把向量数据存储在这个文件夹里
+CHROMA_DB_PATH = "./chroma_db"
+
 
 # 2. 创建一个提示词模板
 #    模板中的 {topic} 是一个占位符，我们可以在运行时动态填充它
@@ -127,3 +139,57 @@ def process_documents():
         raise HTTPException(status_code=404, detail="知识库文件 'poems.txt' 未找到。")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"处理文档时发生错误: {str(e)}")
+    
+
+# --- 新-的 API 端点 ---
+@app.post("/build-index", summary="构建或更新知识库的向量索引")
+def build_knowledge_base_index():
+    """
+    执行完整的 RAG 索引构建流程：
+    1. 加载文档 (Load)
+    2. 分割文本 (Split)
+    3. 文本嵌入 (Embed)
+    4. 存入向量数据库 (Store)
+    """
+    knowledge_file = "poems.txt"
+
+    if not os.path.exists(knowledge_file):
+        raise HTTPException(status_code=404, detail=f"知识库文件 '{knowledge_file}' 未找到。")
+
+    try:
+        # 1. & 2. Load and Split
+        print("--- 步骤 1 & 2: 加载并分割文档 ---")
+        loader = TextLoader(knowledge_file, encoding="utf-8")
+        documents = loader.load()
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=100, chunk_overlap=20)
+        chunks = text_splitter.split_documents(documents)
+        
+        if not chunks:
+            return {"message": "文档为空或分割后没有内容，未创建索引。"}
+
+        print(f"文档被成功分割成 {len(chunks)} 个小块 (chunks)。")
+
+        # 3. & 4. Embed and Store
+        print("--- 步骤 3 & 4: 嵌入文本并存入 ChromaDB ---")
+        
+        # Chroma.from_documents 会自动处理嵌入和存储的过程
+        # - chunks: 我们分割好的文本块
+        # - embeddings: 我们初始化的嵌入模型实例
+        # - persist_directory: 指定向量数据要持久化存储到的文件夹
+        vectorstore = Chroma.from_documents(
+            documents=chunks, 
+            embedding=embeddings, 
+            persist_directory=CHROMA_DB_PATH
+        )
+        
+        print(f"成功创建向量索引并持久化到 '{CHROMA_DB_PATH}'。")
+        
+        # 这个操作在服务器端完成，我们只需要返回一个成功的消息
+        return {
+            "message": "知识库向量索引构建成功！",
+            "total_chunks_added": len(chunks)
+        }
+
+    except Exception as e:
+        print(f"构建索引时发生错误: {e}")
+        raise HTTPException(status_code=500, detail=f"构建索引时发生错误: {str(e)}")
