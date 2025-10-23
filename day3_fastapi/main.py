@@ -11,6 +11,8 @@ from pydantic import BaseModel
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader
 
+from api_mode import ResponseModel
+
 # 创建 FastAPI 应用实例
 app = FastAPI(title="个人藏书管理 API", description="一个用于管理个人书籍的简单 API")
 
@@ -19,7 +21,7 @@ llm = OllamaLLM(model = "llama3:8b")
 
 # 2. 创建一个提示词模板
 #    模板中的 {topic} 是一个占位符，我们可以在运行时动态填充它
-prompt_template_text = "你是一位博学的图书推荐官。请为主题为 '{topic}' 的书籍写一句吸引人的、不超过50字的推荐语。"
+prompt_template_text = "你是一位博学的图书推荐官。请为主题为 '{topic}' 的书籍写一句吸引人的、不超过50字的推荐语。请使用中文回答！"
 prompt_template = PromptTemplate.from_template(prompt_template_text)
 
 # 3. 使用 LangChain 将 LLM 和 Prompt Template 链接起来，形成一个 Chain
@@ -31,33 +33,41 @@ recommendation_chain = prompt_template | llm
 class RecommendationRequest(BaseModel):
     topic: str
 
+class RecommendationData(BaseModel):
+    topic: str
+    recommendation: str
+
 # 创建一个全局的 Library 实例，在整个应用生命周期中共享
 # 注意：这是一种简单的状态管理方式，适用于小型应用
 library_manager = Library()
 
-@app.get("/books", summary="获取所有书籍")
-def get_all_books():
+@app.get("/books", summary="获取所有书籍", response_model=ResponseModel[List[BookCreateModel]])
+def get_all_books() -> ResponseModel:
     """返回图书馆中所有书籍的列表。"""
     books = library_manager.get_all_books()
-    # FastAPI 会自动将 Book 对象转换为 JSON
-    return {"books": [book.to_dict() for book in books]}
+    book_responses = [BookCreateModel(**book.to_dict()) for book in books]
 
-@app.get("/books/search", summary="搜索书籍")
+    # FastAPI 会自动将 Book 对象转换为 JSON
+    return ResponseModel(data=book_responses, code=0, message="成功获取所有书籍")
+
+
+@app.get("/books/search", summary="搜索书籍", response_model=ResponseModel[List[BookCreateModel]])
 def search_books(keyword: str):
     """根据关键词搜索书籍。"""
     found_books = library_manager.search_books(keyword)
     if not found_books:
-        return {"message": f"未找到与 '{keyword}' 相关的书籍。"}
-    return {"results": [book.to_dict() for book in found_books]}
+        return ResponseModel(data=[], code=0, message="未找到匹配的书籍")
+    return ResponseModel(data=[BookCreateModel(**book.to_dict()) for book in found_books], code=0, message="成功找到匹配的书籍")
 
-@app.post("/books", summary="添加一本新书")
+
+@app.post("/books", summary="添加一本新书", response_model=ResponseModel[BookCreateModel])
 def add_new_book(new_book: BookCreateModel):
     """接收书籍信息，创建一本新书并添加到图书馆。"""
     created_book = library_manager.add_book(new_book)
-    return {"message": "书籍添加成功！", "book": created_book.to_dict()}
+    return ResponseModel(data=BookCreateModel(**created_book.to_dict()), code=0, message="书籍添加成功！")
 
 # --- 新增的 API 端点 ---
-@app.post("/books/generate-recommendation", summary="生成书籍主题推荐语")
+@app.post("/books/generate-recommendation", summary="生成书籍主题推荐语", response_model=ResponseModel[RecommendationData])
 def generate_recommendation(request: RecommendationRequest):
     """
     接收一个书籍主题（例如 "科幻小说"），并使用大模型生成一句推荐语。
@@ -71,12 +81,12 @@ def generate_recommendation(request: RecommendationRequest):
         
         print(f"从大模型收到的原始响应: {response_text}")
         
-        return {"topic": request.topic, "recommendation": response_text}
+        return ResponseModel.success_response(data=RecommendationData(topic=request.topic, recommendation=response_text))
 
     except Exception as e:
         print(f"调用大模型时发生错误: {e}")
         # 在 FastAPI 中，可以抛出 HTTPException 来返回一个标准的错误响应
-        raise HTTPException(status_code=500, detail=f"调用大模型时发生错误: {str(e)}")
+        return ResponseModel.error_response(code=500, message=f"调用大模型时发生错误: {str(e)}")
     
 
 @app.post("/books/process-documents", summary="加载并分割知识库文档")
