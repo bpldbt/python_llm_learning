@@ -7,6 +7,8 @@ from fastapi import HTTPException
 
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough # 新增 import
+from langchain_core.output_parsers import StrOutputParser # 新增 import
 from pydantic import BaseModel
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -21,7 +23,7 @@ from api_mode import ResponseModel
 app = FastAPI(title="个人藏书管理 API", description="一个用于管理个人书籍的简单 API")
 
 # 1. 初始化 Ollama LLM 客户端，指向本地运行的 Llama3 模型
-llm = OllamaLLM(model = "llama3:8b")
+llm = OllamaLLM(model = "gemma3:1b")
 
 # --- 新增：初始化嵌入模型 ---
 # 这个模型专门用来将文本转换为向量
@@ -48,6 +50,10 @@ class RecommendationRequest(BaseModel):
 class RecommendationData(BaseModel):
     topic: str
     recommendation: str
+
+# --- RAG 相关的 API 请求体模型 ---
+class RagQueryRequest(BaseModel):
+    question: str
 
 # 创建一个全局的 Library 实例，在整个应用生命周期中共享
 # 注意：这是一种简单的状态管理方式，适用于小型应用
@@ -193,3 +199,87 @@ def build_knowledge_base_index():
     except Exception as e:
         print(f"构建索引时发生错误: {e}")
         raise HTTPException(status_code=500, detail=f"构建索引时发生错误: {str(e)}")
+    
+
+# --- 最核心的新增 API 端点 ---
+@app.post("/rag-query", summary="基于知识库的 RAG 问答")
+def rag_query(request: RagQueryRequest):
+    """
+    接收一个问题，执行完整的 RAG 流程来生成答案：
+    1. 从 ChromaDB 加载向量存储
+    2. 创建检索器
+    3. 构建 RAG 链
+    4. 调用链来获取答案
+    """
+    if not os.path.exists(CHROMA_DB_PATH):
+        raise HTTPException(status_code=404, detail=f"向量数据库 '{CHROMA_DB_PATH}' 不存在。请先调用 /build-index 端点来创建它。")
+
+    try:
+        # 1. 从持久化文件中加载向量存储
+        print("--- 步骤 1: 加载已存在的 ChromaDB 向量存储 ---")
+        vectorstore = Chroma(
+            persist_directory=CHROMA_DB_PATH, 
+            embedding_function=embeddings
+        )
+
+        # 2. 创建检索器 (Retriever)
+        #    retriever 会根据问题，从 vectorstore 中找出最相关的文档
+        print("--- 步骤 2: 创建检索器 ---")
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 1}) # "k": 2 表示我们想检索回 2 个最相关的文档块
+
+
+        # 在构建完整链之前，单独调用一次 retriever 来获取 context
+        print("--- 步骤 2.5: 单独执行检索以进行调试 ---")
+        retrieved_docs = retriever.invoke(request.question)
+    
+        # 打印检索到的上下文内容
+        print("--- 检索到的上下文内容 ---")
+        for doc in retrieved_docs:
+            print(doc.page_content)
+            print("-" * 20)
+
+        # 3. 构建 RAG 提示词模板
+        #    这个模板是 RAG 的核心，它指导 LLM 如何利用我们提供的上下文
+        rag_prompt_template_text = """
+        你是一个知识渊博的诗词助手。请根据下面提供的上下文信息来回答用户的问题。
+        如果上下文中没有足够的信息来回答问题，就说你不知道。请不要编造答案。
+
+        上下文:
+        {context}
+
+        问题:
+        {question}
+
+        回答:
+        """
+        rag_prompt = PromptTemplate.from_template(rag_prompt_template_text)
+
+        # 4. 构建完整的 RAG 链 (Chain)
+        #    这是 LangChain 表达式语言 (LCEL) 的强大之处
+        print("--- 步骤 4: 构建并执行 RAG 链 ---")
+        
+        # 定义一个函数，用于将检索到的文档列表格式化为单一的字符串
+        def format_docs(docs):
+            return "\n\n".join(doc.page_content for doc in docs)
+
+        rag_chain = (
+            {"context": retriever | format_docs, "question": RunnablePassthrough()}
+            | rag_prompt
+            | llm
+            | StrOutputParser()
+        )
+        
+        # 5. 调用 RAG 链
+        #    .invoke() 的输入会作为 RunnablePassthrough() 的值，即用户的原始问题
+        answer = rag_chain.invoke(request.question)
+        
+        print(f"RAG 链成功执行，生成的回答是: {answer}")
+
+        return {
+            "question": request.question,
+            "answer": answer
+        }
+
+    except Exception as e:
+        print(f"RAG 查询时发生错误: {e}")
+        raise HTTPException(status_code=500, detail=f"RAG 查询时发生错误: {str(e)}")
