@@ -2,10 +2,14 @@ from fastapi import FastAPI
 from library import Library
 from book import BookCreateModel
 from typing import List
+from fastapi import HTTPException
 
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import TextLoader
 
 # 创建 FastAPI 应用实例
 app = FastAPI(title="个人藏书管理 API", description="一个用于管理个人书籍的简单 API")
@@ -72,5 +76,44 @@ def generate_recommendation(request: RecommendationRequest):
     except Exception as e:
         print(f"调用大模型时发生错误: {e}")
         # 在 FastAPI 中，可以抛出 HTTPException 来返回一个标准的错误响应
-        from fastapi import HTTPException
         raise HTTPException(status_code=500, detail=f"调用大模型时发生错误: {str(e)}")
+    
+
+@app.post("/books/process-documents", summary="加载并分割知识库文档")
+def process_documents():
+    """
+    演示 RAG 的第一步：从文件加载文档并将其分割成小块。
+    """
+    try:
+        # 1. 加载文档
+            loader = TextLoader("poems.txt", encoding="utf-8")
+            documents = loader.load()
+            print(f"加载了 {len(documents)} 个文档。")
+
+            # 2. 创建文本分割器
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=100,
+                chunk_overlap=20,
+                # separators=["\n\n", "\n", " ", ""]
+            )
+
+            # 3. 分割文档
+            chunks = text_splitter.split_documents(documents)
+            print(f"分割后得到 {len(chunks)} 个文档块。")
+
+            if chunks:
+                print("示例文档块内容：")
+                print(chunks[0].page_content)
+
+            # 返回分割后的信息给前端
+            return {
+            "message": "文档加载和分割成功！",
+            "total_documents": len(documents),
+            "total_chunks": len(chunks),
+            "chunks_preview": [chunk.page_content for chunk in chunks[:3]] # 返回前3个块作为预览
+            }
+    
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="知识库文件 'poems.txt' 未找到。")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"处理文档时发生错误: {str(e)}")
