@@ -4,8 +4,13 @@ from library import Library
 from book import BookCreateModel
 from typing import List
 from fastapi import HTTPException
+from fastapi.middleware.cors import CORSMiddleware # <--- 导入这个中间件
+from langchain_core.runnables import RunnableLambda
 
-from langchain_ollama import OllamaLLM
+from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI # 替换掉 OllamaLLM
+# from langchain_ollama import OllamaLLM
+
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough # 新增 import
 from langchain_core.output_parsers import StrOutputParser # 新增 import
@@ -16,14 +21,47 @@ from langchain_community.document_loaders import TextLoader
 from langchain_ollama import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
 
-
 from api_mode import ResponseModel
+
+# --- 2. 在所有代码之前，加载 .env 文件中的环境变量 ---
+load_dotenv()
+
+# --- 3. 检查 API Key 是否已设置 ---
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+if not DEEPSEEK_API_KEY:
+    # 如果没有找到 API Key，程序会立即退出并给出提示
+    raise ValueError("错误: DEEPSEEK_API_KEY 环境变量未设置。请在 .env 文件中添加它。")
 
 # 创建 FastAPI 应用实例
 app = FastAPI(title="个人藏书管理 API", description="一个用于管理个人书籍的简单 API")
 
+# --- 添加 CORS 中间件配置 ---
+
+# 定义允许的来源列表
+# 在开发阶段，我们可以使用 "*" 来允许所有来源
+# 在生产环境中，应该替换为你的前端应用的具体域名，例如 ["http://your-frontend-app.com"]
+origins = [
+    "*", # 允许所有来源
+    # 如果你的前端未来部署在 http://localhost:3000，可以这样写：
+    # "http://localhost:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,       # 允许访问的来源
+    allow_credentials=True,    # 是否支持 cookie
+    allow_methods=["*"],         # 允许所有的请求方法 (GET, POST, PUT, DELETE 等)
+    allow_headers=["*"],         # 允许所有的请求头
+)
+
 # 1. 初始化 Ollama LLM 客户端，指向本地运行的 Llama3 模型
-llm = OllamaLLM(model = "gemma3:1b")
+# llm = OllamaLLM(model = "gemma3:1b")
+# --- 新的代码 (使用 ChatOpenAI 指向 DeepSeek) ---
+llm = ChatOpenAI(
+    model="deepseek-chat",            # 使用 DeepSeek 指定的模型名称
+    api_key=DEEPSEEK_API_KEY,         # 从环境变量中读取的 key
+    base_url="https://api.deepseek.com" # DeepSeek 的 API 地址
+)
 
 # --- 新增：初始化嵌入模型 ---
 # 这个模型专门用来将文本转换为向量
@@ -40,7 +78,7 @@ prompt_template = PromptTemplate.from_template(prompt_template_text)
 
 # 3. 使用 LangChain 将 LLM 和 Prompt Template 链接起来，形成一个 Chain
 #    这个 Chain 的作用是：接收一个 topic -> 格式化 prompt -> 调用 LLM -> 解析输出
-recommendation_chain = prompt_template | llm
+recommendation_chain = prompt_template | llm | StrOutputParser()
 
 
 # --- 新增：定义 API 请求体模型 ---
@@ -225,7 +263,7 @@ def rag_query(request: RagQueryRequest):
         # 2. 创建检索器 (Retriever)
         #    retriever 会根据问题，从 vectorstore 中找出最相关的文档
         print("--- 步骤 2: 创建检索器 ---")
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 1}) # "k": 2 表示我们想检索回 2 个最相关的文档块
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 20}) # "k": 2 表示我们想检索回 2 个最相关的文档块
 
 
         # 在构建完整链之前，单独调用一次 retriever 来获取 context
@@ -261,11 +299,21 @@ def rag_query(request: RagQueryRequest):
         # 定义一个函数，用于将检索到的文档列表格式化为单一的字符串
         def format_docs(docs):
             return "\n\n".join(doc.page_content for doc in docs)
+        
+        # --- 自定义的打印函数 ---
+        def log_and_pass_through(x):
+            """一个简单的“间谍”函数，打印输入然后原样返回。"""
+            print("--- Intercepted Data ---")
+            print(x)
+            print("------------------------")
+            return x
 
         rag_chain = (
             {"context": retriever | format_docs, "question": RunnablePassthrough()}
             | rag_prompt
+            | RunnableLambda(log_and_pass_through)  # <-- 在 LLM 调用前插入，打印完整的 Prompt
             | llm
+            | RunnableLambda(log_and_pass_through)  # <-- 在 LLM 调用后插入，打印原始的 AIMessage
             | StrOutputParser()
         )
         
